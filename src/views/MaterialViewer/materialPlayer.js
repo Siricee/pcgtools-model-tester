@@ -7,6 +7,7 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import { GUI } from 'three/examples/jsm/libs/lil-gui.module.min.js'
 
 let camera, scene, renderer, orbitControls
+let pmremGenerator = null
 /** 仅保留一盏环境光，不可动态添加 */
 let ambientLight = null
 /** 动态光源条目：push 进数组，每个含 light + helper + lil-gui 子文件夹 */
@@ -192,25 +193,8 @@ function ensureStandardMaterialAt(mesh, materialIndex) {
   return mat?.isMeshStandardMaterial ? mat : null
 }
 
-function setSelectionHighlight(selUuid) {
-  if (!rootObject) return
-  const { mesh: selectedMesh } = resolveMeshAndMaterialIndex(selUuid)
-  rootObject.traverse((child) => {
-    if (!child.isMesh && !child.isSkinnedMesh) return
-    const highlight = !!(selectedMesh && child.uuid === selectedMesh.uuid)
-    const mats = Array.isArray(child.material) ? child.material : [child.material]
-    for (const m of mats) {
-      if (!m?.isMeshStandardMaterial) continue
-      if (highlight) {
-        m.emissive.setHex(0x224422)
-        m.emissiveIntensity = 0.35
-      } else {
-        m.emissive.setHex(0x000000)
-        m.emissiveIntensity = 1
-      }
-    }
-  })
-}
+/** 选中态仅用包围盒线框提示，避免改写 emissive / emissiveIntensity（右侧面板可实时调节） */
+function setSelectionHighlight(_selUuid) {}
 
 function removeHemisphereEntry(entry) {
   const i = hemiLightEntries.indexOf(entry)
@@ -526,6 +510,9 @@ export function main(DOM, { guiContainer, onError, onModelLoaded, onTextureAppli
   renderer.toneMappingExposure = 1.0
   DOM.appendChild(renderer.domElement)
 
+  pmremGenerator = new THREE.PMREMGenerator(renderer)
+  pmremGenerator.compileEquirectangularShader()
+
   scene = new THREE.Scene()
   scene.background = new THREE.Color(0xf0f0f0)
   scene.fog = new THREE.Fog(0xa0a0a0, 160, 1000)
@@ -602,7 +589,10 @@ export async function loadModel(file) {
       rootObject.traverse((child) => {
         if (child.material) {
           const mats = Array.isArray(child.material) ? child.material : [child.material]
-          mats.forEach((m) => m?.dispose?.())
+          mats.forEach((m) => {
+            disposeMaterialEnvPmrem(m)
+            m?.dispose?.()
+          })
         }
         if (child.geometry) child.geometry.dispose()
       })
@@ -630,10 +620,21 @@ export async function loadModel(file) {
 const SLOT_COLOR_SPACE = {
   map: THREE.SRGBColorSpace,
   emissiveMap: THREE.SRGBColorSpace,
+  /** 单张等距柱状环境图，经 PMREM 生成 envMap */
+  envMap: THREE.SRGBColorSpace,
   normalMap: THREE.NoColorSpace,
   roughnessMap: THREE.NoColorSpace,
   metalnessMap: THREE.NoColorSpace,
   aoMap: THREE.NoColorSpace,
+}
+
+function disposeMaterialEnvPmrem(mat) {
+  const rt = mat?.userData?.__envPmremRT
+  if (rt && typeof rt.dispose === 'function') {
+    if (mat.envMap === rt.texture) mat.envMap = null
+    rt.dispose()
+    delete mat.userData.__envPmremRT
+  }
 }
 
 export async function applyTextureToSelection(file, slot) {
@@ -655,6 +656,34 @@ export async function applyTextureToSelection(file, slot) {
       textureLoader.load(texUrl, resolve, undefined, reject)
     })
     URL.revokeObjectURL(texUrl)
+
+    if (slot === 'envMap') {
+      if (!pmremGenerator) {
+        _onError && _onError('渲染器未初始化 PMREM')
+        tex.dispose?.()
+        return
+      }
+      tex.mapping = THREE.EquirectangularReflectionMapping
+      tex.colorSpace = SLOT_COLOR_SPACE.envMap ?? THREE.SRGBColorSpace
+      tex.needsUpdate = true
+      disposeMaterialEnvPmrem(mat)
+      let pmremRt
+      try {
+        pmremRt = pmremGenerator.fromEquirectangular(tex)
+      } catch (err) {
+        tex.dispose?.()
+        _onError && _onError(`环境贴图预处理失败: ${err?.message ?? err}`)
+        return
+      }
+      tex.dispose?.()
+      mat.userData.__envPmremRT = pmremRt
+      mat.envMap = pmremRt.texture
+      if (mat.envMapIntensity === undefined || mat.envMapIntensity === null) mat.envMapIntensity = 1
+      mat.needsUpdate = true
+      setSelectionHighlight(selectedUuid)
+      _onTextureApplied && _onTextureApplied(slot, file.name)
+      return
+    }
 
     tex.wrapS = tex.wrapT = THREE.RepeatWrapping
     tex.colorSpace = SLOT_COLOR_SPACE[slot] ?? THREE.NoColorSpace
@@ -691,10 +720,35 @@ export function getSelectedUuid() {
 
 export function getMaterialPbr() {
   const { mesh, materialIndex } = resolveMeshAndMaterialIndex(selectedUuid)
-  if (!mesh) return { roughness: 0.5, metalness: 0, valid: false }
+  if (!mesh) {
+    return {
+      roughness: 0.5,
+      metalness: 0,
+      valid: false,
+      color: '#ffffff',
+      emissive: '#000000',
+      emissiveIntensity: 1,
+    }
+  }
   const mat = ensureStandardMaterialAt(mesh, materialIndex)
-  if (!mat) return { roughness: 0.5, metalness: 0, valid: false }
-  return { roughness: mat.roughness, metalness: mat.metalness, valid: true }
+  if (!mat) {
+    return {
+      roughness: 0.5,
+      metalness: 0,
+      valid: false,
+      color: '#ffffff',
+      emissive: '#' + new THREE.Color(0).getHexString(),
+      emissiveIntensity: 1,
+    }
+  }
+  return {
+    roughness: mat.roughness,
+    metalness: mat.metalness,
+    valid: true,
+    color: '#' + mat.color.getHexString(),
+    emissive: '#' + mat.emissive.getHexString(),
+    emissiveIntensity: mat.emissiveIntensity ?? 1,
+  }
 }
 
 export function setMaterialRoughness(v) {
@@ -712,6 +766,35 @@ export function setMaterialMetalness(v) {
   const mat = ensureStandardMaterialAt(mesh, materialIndex)
   if (!mat) return
   mat.metalness = Math.min(1, Math.max(0, Number(v)))
+  mat.needsUpdate = true
+}
+
+export function setMaterialColor(hex) {
+  const { mesh, materialIndex } = resolveMeshAndMaterialIndex(selectedUuid)
+  if (!mesh) return
+  const mat = ensureStandardMaterialAt(mesh, materialIndex)
+  if (!mat) return
+  mat.color.set(hex)
+  mat.needsUpdate = true
+}
+
+export function setMaterialEmissive(hex) {
+  const { mesh, materialIndex } = resolveMeshAndMaterialIndex(selectedUuid)
+  if (!mesh) return
+  const mat = ensureStandardMaterialAt(mesh, materialIndex)
+  if (!mat) return
+  mat.emissive.set(hex)
+  mat.needsUpdate = true
+}
+
+export function setMaterialEmissiveIntensity(v) {
+  const { mesh, materialIndex } = resolveMeshAndMaterialIndex(selectedUuid)
+  if (!mesh) return
+  const mat = ensureStandardMaterialAt(mesh, materialIndex)
+  if (!mat) return
+  const n = Number(v)
+  if (!Number.isFinite(n)) return
+  mat.emissiveIntensity = Math.max(0, n)
   mat.needsUpdate = true
 }
 
@@ -802,6 +885,7 @@ export function dispose() {
         const mats = Array.isArray(child.material) ? child.material : [child.material]
         mats.forEach((m) => {
           if (!m) return
+          disposeMaterialEnvPmrem(m)
           for (const k of Object.keys(m)) {
             const v = m[k]
             if (v && v.isTexture) v.dispose()
@@ -824,6 +908,8 @@ export function dispose() {
   selectedUuid = null
   orbitControls = null
   camera = null
+  pmremGenerator?.dispose()
+  pmremGenerator = null
   _onError = null
   _onModelLoaded = null
   _onTextureApplied = null

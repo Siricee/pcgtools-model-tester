@@ -103,7 +103,40 @@
 
       <div class="panel-section pbr-section">
         <span class="section-label">PBR — MeshStandard</span>
-        <p class="texture-hint">作用于左侧当前选中的网格或材质槽：调节粗糙度与金属度。</p>
+        <p class="texture-hint">作用于左侧当前选中的网格或材质槽：调节基础色、自发光、粗糙度与金属度等。</p>
+        <div class="pbr-row pbr-color-row">
+          <span class="texture-label">color</span>
+          <n-color-picker
+            :value="pbrColor"
+            :show-alpha="false"
+            :modes="['hex']"
+            size="small"
+            :disabled="!modelFile || !pbrValid"
+            @update:value="onPbrColor"
+          />
+        </div>
+        <div class="pbr-row pbr-color-row">
+          <span class="texture-label">emissive</span>
+          <n-color-picker
+            :value="pbrEmissive"
+            :show-alpha="false"
+            :modes="['hex']"
+            size="small"
+            :disabled="!modelFile || !pbrValid"
+            @update:value="onPbrEmissive"
+          />
+        </div>
+        <div class="pbr-row">
+          <span class="texture-label">emissiveIntensity</span>
+          <n-slider
+            :value="pbrEmissiveIntensity"
+            :min="0"
+            :max="4"
+            :step="0.01"
+            :disabled="!modelFile || !pbrValid"
+            @update:value="onPbrEmissiveIntensity"
+          />
+        </div>
         <div class="pbr-row">
           <span class="texture-label">roughness</span>
           <n-slider
@@ -130,7 +163,10 @@
 
       <div class="panel-section texture-section">
         <span class="section-label">贴图 (作用于选中网格)</span>
-        <p class="texture-hint">在左侧层级中点击要编辑的网格或材质槽；贴图写入对应 MeshStandard 槽位。</p>
+        <p class="texture-hint">
+          在左侧层级中点击要编辑的网格或材质槽；贴图写入对应 MeshStandard 槽位。环境反射请使用等距柱状全景图（常见 2:1
+          JPG/PNG）。
+        </p>
         <div v-for="row in textureRows" :key="row.slot" class="texture-row">
           <div class="texture-row-head">
             <span class="texture-label">{{ row.label }}</span>
@@ -179,6 +215,9 @@ import {
   getMaterialPbr,
   setMaterialRoughness,
   setMaterialMetalness,
+  setMaterialColor,
+  setMaterialEmissive,
+  setMaterialEmissiveIntensity,
 } from './materialPlayer.js'
 
 const LEFT_W = 300
@@ -208,15 +247,52 @@ const texLoading = ref(false)
 
 const pbrRoughness = ref(0.5)
 const pbrMetalness = ref(0)
+const pbrColor = ref('#ffffff')
+const pbrEmissive = ref('#000000')
+const pbrEmissiveIntensity = ref(1)
 const pbrValid = ref(false)
+
+function normalizeHexColor(v: string | unknown): string {
+  if (typeof v !== 'string') return '#ffffff'
+  const s = v.trim()
+  if (/^#[0-9a-fA-F]{6}$/.test(s)) return s
+  if (/^#[0-9a-fA-F]{3}$/.test(s)) {
+    const r = s[1],
+      g = s[2],
+      b = s[3]
+    return `#${r}${r}${g}${g}${b}${b}`
+  }
+  return '#ffffff'
+}
 
 function refreshPbr() {
   const p = getMaterialPbr()
   pbrValid.value = p.valid
+  pbrColor.value = normalizeHexColor(p.color ?? '#ffffff')
+  pbrEmissive.value = normalizeHexColor(p.emissive ?? '#000000')
+  pbrEmissiveIntensity.value =
+    typeof p.emissiveIntensity === 'number' && Number.isFinite(p.emissiveIntensity) ? p.emissiveIntensity : 1
   if (p.valid) {
     pbrRoughness.value = p.roughness
     pbrMetalness.value = p.metalness
   }
+}
+
+function onPbrColor(v: string) {
+  const hex = normalizeHexColor(v)
+  pbrColor.value = hex
+  setMaterialColor(hex)
+}
+
+function onPbrEmissive(v: string) {
+  const hex = normalizeHexColor(v)
+  pbrEmissive.value = hex
+  setMaterialEmissive(hex)
+}
+
+function onPbrEmissiveIntensity(v: number) {
+  pbrEmissiveIntensity.value = v
+  setMaterialEmissiveIntensity(v)
 }
 
 function onPbrRoughness(v: number) {
@@ -235,6 +311,8 @@ const textureRows = [
   { slot: 'roughnessMap', label: '粗糙度 (R)' },
   { slot: 'metalnessMap', label: '金属度 (M)' },
   { slot: 'aoMap', label: '环境光遮蔽 (AO)' },
+  { slot: 'emissiveMap', label: '自发光贴图 (Emissive)' },
+  { slot: 'envMap', label: '环境反射 (ENV 全景图)' },
 ] as const
 
 const collapsedSet = computed(() => collapsedUUIDs.value)
@@ -475,7 +553,7 @@ async function onTexFileChange(e: Event, slot: string) {
 .stat-container {
   position: absolute;
   top: 0;
-  left: 0;
+  left: 400px;
 }
 
 .panel-tab {
@@ -779,6 +857,14 @@ async function onTexFileChange(e: Event, slot: string) {
 
 .pbr-section :deep(.n-slider) {
   margin-top: 2px;
+}
+
+.pbr-section .pbr-color-row :deep(.n-color-picker) {
+  width: 100%;
+}
+
+.pbr-section .pbr-color-row :deep(.n-color-picker-trigger) {
+  width: 100%;
 }
 
 .panel-section {
